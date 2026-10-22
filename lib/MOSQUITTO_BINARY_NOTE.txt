@@ -1,0 +1,18 @@
+Mosquitto dependency note
+=========================
+
+libmosquitto.so is the official Eclipse Mosquitto MQTT Client library.
+It is NOT an MQTT Broker.
+
+lljs_ctrl uses the official Mosquitto Broker executable (mosquitto) as its MQTT Server/Broker.
+The application starts/stops that broker through src/network/mqtt_broker.cpp.
+
+For Ubuntu 20.04, run:
+  ./scripts/fetch_mosquitto_ubuntu20.sh
+
+The script installs:
+  include/mosquitto.h
+  lib/libmosquitto.so*
+  bin/mosquitto
+
+Do not copy x86_64 libraries/binaries to an ARM/aarch64 SC668S. Use matching architecture packages.

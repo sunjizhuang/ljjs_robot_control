@@ -1,0 +1,111 @@
+# ══════════════════════════════════════════════════════════
+# 灵境具身机器人控制服务端 (lljs_ctrl) 配置文件
+#
+# 双设备: 云迹 SC668s (服务机器人) + 云深处 Lite3 (四足机器狗)
+# 架构: server 模式为 外部控制端 → TCP Server → 指令解析 → 翻译引擎 → 设备驱动
+#        client 模式为 外部控制端 TCP Server → TCP Client → 指令解析 → 翻译引擎 → 设备驱动
+#
+# 用法:
+#   lljs_ctrl -c /etc/lljs_ctrl/config.yaml
+#   lljs_ctrl --check-config -c config.yaml   # 校验配置
+#   lljs_ctrl --dump-config  -c config.yaml   # 查看最终生效配置
+# ══════════════════════════════════════════════════════════
+
+# ── 全局 ──
+# 连接设备: yunji / lite3 / both
+device: lite3
+
+# 日志级别: debug / info / warn / error
+log_level: info
+
+# 默认激活设备: yunji / lite3，留空表示自动（优先云迹）
+default_active: ""
+
+# ── 外部控制端网络通道 ──
+# 三种通道可以同时开启，彼此独立：
+#   server_enabled: 本机监听 server.bind/server.port
+#   client_enabled: 本机主动连接 client.server_ip/client.server_port，断线自动重连
+#   mqtt_enabled:   MQTT 总开关；开启后可独立启用 Broker(Server) 与 Client
+# 默认：TCP client 开启，TCP server/mqtt 关闭。
+network:
+  mode: client                  # 兼容旧配置；有 *_enabled 时以独立开关为准
+  server_enabled: false
+  client_enabled: true
+  mqtt_enabled: false
+
+client:
+  server_ip: "175.24.177.82"
+  server_port: 20001
+  reconnect_interval_ms: 5000
+  # TCP Client 连接成功后立即发送注册报文；每次自动重连成功都会再次发送
+  # 生成格式: {"cmd":"register","edgeId":"edge-1","robotId":"lite3-1","device":"lite3"}
+  edge_id: "edge-1"
+  robot_id: "lite3-1"
+  # 可选: yunji / lite3；留空时使用当前实际激活设备类型
+  device: "lite3"
+
+# ── MQTT 通信 ──
+# network.mqtt_enabled 为 MQTT 总开关，默认关闭。
+# MQTT 可以同时承担两个角色：
+#   1) Broker/Server：lljs_ctrl 自己启动官方 Mosquitto Broker，允许其它 MQTT 客户端连接并 PUB/SUB。
+#   2) Client：lljs_ctrl 使用 libmosquitto 连接 Broker，SUB command、PUB telemetry。
+# broker_enabled / client_enabled 可独立控制。
+# 当 broker_enabled=true 时，即使 client_enabled=false，lljs_ctrl 仍会自动启动一个内部 MQTT Client
+# 连接自己的 Broker，以便把其它客户端 PUB 的 JSON 消息送入统一指令处理链。
+mqtt:
+  broker_enabled: false
+  broker_bind: "0.0.0.0"
+  broker_port: 1883
+  # 留空自动查找 /usr/sbin/mosquitto 或 /usr/bin/mosquitto
+  broker_executable: ""
+  broker_config: "/tmp/lljs_ctrl_mosquitto.conf"
+  broker_allow_anonymous: true
+
+  client_enabled: false
+  # broker_enabled=true 时，Client 默认连接本机 Broker；否则连接以下外部 Broker。
+  host: "127.0.0.1"
+  port: 1883
+  client_id: "lljs_ctrl"
+  username: ""
+  password: ""
+  # Topic 不在配置文件中配置，由 src/network/mqtt_client.cpp 统一定义。
+  # 默认订阅：device/command/#（支持 device/command 及任意扩展层级）
+  # 默认发布：device/telemetry
+  reconnect_interval_ms: 5000
+
+# ── 云迹 SC668s（TCP，URL 字符串指令） ──
+yunji:
+  ip: "192.168.10.10"
+  port: 31001
+
+# ── 云深处 Lite3（UDP，二进制指令码） ──
+lite3:
+  ip: "192.168.1.120"
+  port: 43893
+  # 运动主机上报 0x0901/0x0902/0x0903 的 UDP 端口
+  receive_port: 43893
+
+# Lite3 心跳（SDK 要求 20ms 周期，一般不改）
+lite3_heartbeat:
+  interval_ms: 20
+
+# ── TCP Server（外部控制端接入） ──
+server:
+  bind: "0.0.0.0"
+  port: 9000
+
+# ── 遥控参数（云迹速度限幅与步进） ──
+control:
+  joy_hz: 5            # joy_control 发送频率 (Hz)，云迹 API 要求 >2
+  max_linear: 0.5      # 最大线速度 (m/s)，API 限定 [-0.5, 0.5]
+  max_angular: 1.0     # 最大角速度 (rad/s)，API 限定 [-1.0, 1.0]
+  linear_step: 0.05    # 每次按键线速度变化量 (m/s)
+  angular_step: 0.1    # 每次按键角速度变化量 (rad/s)
+
+# ── 状态轮询 ──
+status:
+  poll_hz: 2           # 机器人状态查询频率 (Hz)
+
+# ── 日志 ──
+log:
+  queue_size: 20       # 终端 HUD 显示的最近日志条数

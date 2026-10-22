@@ -1,0 +1,13 @@
+# 忽略编译目录
+build/
+build_arm/
+build_x86/
+
+# 忽略临时文件和日志
+*.swp
+*.log
+*.o
+lljs_ctrl
+
+# 忽略系统缓存
+.DS_Store
