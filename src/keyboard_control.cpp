@@ -238,6 +238,11 @@ void KeyboardController::handleRemoteCommand(const std::string& cmd_text, int cl
 void KeyboardController::handleRemoteCommandFrom(const std::string& cmd_text,
                                                    const std::string& source)
 {
+    /* 前置过滤器: av_* 等 Agora 指令在此被拦截处理, 不进入设备指令链 */
+    if (command_filter_ && command_filter_(cmd_text, source)) {
+        return;
+    }
+
     /* 所有网络入口最终都走同一条 InputAdapter → CmdTranslator 链路。 */
     std::string dev_type = translator_->getActiveDeviceType();
     InputCommand cmd = InputAdapter::parse(cmd_text, source, dev_type);

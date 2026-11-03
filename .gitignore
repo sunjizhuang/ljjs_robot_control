@@ -2,6 +2,7 @@
 build/
 build_arm/
 build_x86/
+test/__pycache__/
 
 # 忽略临时文件和日志
 *.swp

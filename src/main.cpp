@@ -16,6 +16,12 @@
 #include <csignal>
 #include <getopt.h>
 #include <unistd.h>
+#include <functional>
+
+#ifdef LLJS_WITH_AGORA
+#include "agora/agora_service.h"
+#include "agora/agora_bridge.h"
+#endif
 
 /* Lite3 telemetry → TCP 测试通道：每 200ms 推送最新 0x0901/0902/0903 快照。 */
 #include <sstream>
@@ -151,7 +157,8 @@ static void lite3TelemetryThread(Lite3Driver* driver,
                                  bool server_enabled,
                                  bool client_enabled,
                                  bool mqtt_enabled,
-                                 std::atomic<bool>* running)
+                                 std::atomic<bool>* running,
+                                 const std::function<void(const std::string&)>& agora_hook)
 {
     while (running->load()) {
         if (driver && driver->isConnected()) {
@@ -174,6 +181,12 @@ static void lite3TelemetryThread(Lite3Driver* driver,
                     mqtt->publish(MqttClient::telemetryTopic(), t1);
                     mqtt->publish(MqttClient::telemetryTopic(), t2);
                     mqtt->publish(MqttClient::telemetryTopic(), t3);
+                }
+                /* Agora RTM/RTCM 遥测出口 (与 TCP/MQTT 完全平行) */
+                if (agora_hook) {
+                    agora_hook(t1);
+                    agora_hook(t2);
+                    agora_hook(t3);
                 }
             }
         }
@@ -385,6 +398,45 @@ int main(int argc, char* argv[])
                                   server_enabled ? &server : nullptr,
                                   client_enabled ? &client : nullptr);
 
+    /* ════ 4.5 Agora RTSA 音视频 + 信令 (总开关控制) ════ */
+#ifdef LLJS_WITH_AGORA
+    AgoraService* agora_svc = nullptr;
+    AgoraBridge*  agora_bridge = nullptr;
+    if (g_config.agora.enabled) {
+        agora_svc = new AgoraService();
+        agora_bridge = new AgoraBridge(agora_svc);
+        /* RTM/RTCM 收到的业务 JSON → 统一指令链 */
+        agora_bridge->setCommandSink([&controller](const std::string& payload,
+                                                    const std::string& source) {
+            controller.handleRemoteCommandFrom(payload, source);
+        });
+        /* 指令链入口前置拦截 av_* 指令 */
+        controller.setCommandFilter(
+            [agora_bridge](const std::string& text, const std::string& source) {
+                return agora_bridge->tryHandleCommand(text, source);
+            });
+        std::string agora_err;
+        if (agora_svc->start(agora_err)) {
+            LOG_INFO("Agora 已启动: RTM=%s 视频=%s 音频=%s",
+                     g_config.agora.rtm.enabled ? "开" : "关",
+                     g_config.agora.video.enabled ? "开" : "关",
+                     g_config.agora.audio.enabled ? "开" : "关");
+        } else {
+            LOG_ERR("Agora 启动失败: %s (继续以纯控制面模式运行)", agora_err.c_str());
+            delete agora_bridge;
+            delete agora_svc;
+            agora_bridge = nullptr;
+            agora_svc = nullptr;
+        }
+    } else {
+        LOG_INFO("Agora: 未启用 (agora.enabled=false)");
+    }
+#else
+    if (g_config.agora.enabled) {
+        LOG_WARN("配置启用了 agora, 但本构建未集成 Agora (需 -DLLJS_WITH_AGORA=ON), 忽略");
+    }
+#endif
+
     if (server_enabled) {
         server.setCommandCallback([&controller](const std::string& cmd, int client_fd) {
             controller.handleRemoteCommand(cmd, client_fd);
@@ -461,12 +513,25 @@ int main(int argc, char* argv[])
         }
     }
 
-    /* Lite3 telemetry → TCP/MQTT：每 200ms 推送最新快照。 */
+    /* Lite3 telemetry → TCP/MQTT/Agora：每 200ms 推送最新快照。 */
     std::atomic<bool> telemetry_running{true};
+#ifdef LLJS_WITH_AGORA
+    std::function<void(const std::string&)> agora_hook;
+    if (agora_bridge) {
+        agora_hook = [agora_bridge](const std::string& json) {
+            agora_bridge->publishTelemetry(json);
+        };
+    }
     std::thread telemetry_thread(lite3TelemetryThread,
                                  &lite3_driver, &server, &client, &mqtt,
                                  server_enabled, client_enabled, mqtt_enabled,
-                                 &telemetry_running);
+                                 &telemetry_running, agora_hook);
+#else
+    std::thread telemetry_thread(lite3TelemetryThread,
+                                 &lite3_driver, &server, &client, &mqtt,
+                                 server_enabled, client_enabled, mqtt_enabled,
+                                 &telemetry_running, nullptr);
+#endif
 
     /* 启动键盘控制主循环（阻塞） */
     controller.run();
@@ -477,6 +542,15 @@ int main(int argc, char* argv[])
     if (telemetry_thread.joinable()) telemetry_thread.join();
 
     LOG_INFO("断开连接...");
+#ifdef LLJS_WITH_AGORA
+    if (agora_svc) {
+        agora_svc->stop();
+        delete agora_bridge;
+        delete agora_svc;
+        agora_bridge = nullptr;
+        agora_svc = nullptr;
+    }
+#endif
     if (yunji_ok)  yunji_driver.disconnect();
     if (lite3_ok)  lite3_driver.disconnect();
     server.stop();

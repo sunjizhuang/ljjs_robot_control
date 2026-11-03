@@ -41,6 +41,13 @@ public:
     /* 指定网络来源，用于 MQTT 等非 TCP 通道的日志与统一解析。 */
     void handleRemoteCommandFrom(const std::string& cmd, const std::string& source);
 
+    /* 指令前置过滤器（可选）:
+     * 返回 true 表示该指令已被过滤器处理（如 Agora av_* 指令），调用方直接返回。
+     * 用于在不引入新模块依赖的情况下扩展指令集。 */
+    void setCommandFilter(std::function<bool(const std::string& text,
+                                             const std::string& source)> filter)
+    { command_filter_ = std::move(filter); }
+
 private:
     /* 终端 raw 模式 */
     void enableRawMode();
@@ -64,6 +71,9 @@ private:
     CmdTranslator*       translator_;
     TcpServer*           server_;
     TcpControlClient*    client_;
+
+    /* 指令前置过滤器 (main 注入, 如 AgoraBridge::tryHandleCommand) */
+    std::function<bool(const std::string&, const std::string&)> command_filter_;
 
     std::atomic<bool>    running_{false};
 

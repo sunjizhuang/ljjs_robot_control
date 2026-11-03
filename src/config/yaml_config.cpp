@@ -8,6 +8,8 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <vector>
+#include <utility>
 
 /* 全局配置实例定义 */
 AppConfig g_config;
@@ -15,8 +17,9 @@ AppConfig g_config;
 /* ══════════════════════════════════════════════════════════
  * 极简 YAML 解析器
  *
- * 解析结果为 "section.key" → 原始字符串值 的扁平 map。
- * 只支持两层结构（顶层键 + 一层嵌套区块），足够本项目使用。
+ * 解析结果为 "section.sub.key" → 原始字符串值 的扁平 map。
+ * 支持任意层缩进嵌套（栈式跟踪），向后兼容原两层结构。
+ * 不支持: 列表、锚点、多文档、流式风格 (JSON 式 {})
  * ══════════════════════════════════════════════════════════ */
 
 namespace {
@@ -70,7 +73,8 @@ bool parseYamlFile(const std::string& path,
     }
 
     std::string line;
-    std::string current_section;
+    /* 区块栈: (缩进, 区块名)。顶层区块缩进 0，子区块缩进逐层递增 */
+    std::vector<std::pair<int, std::string>> sections;
     int line_no = 0;
 
     while (std::getline(fin, line)) {
@@ -123,42 +127,33 @@ bool parseYamlFile(const std::string& path,
             return false;
         }
 
-        if (indent == 0) {
-            /* 顶层 */
-            if (value.empty()) {
-                /* 新区块开始 */
-                current_section = key;
-            } else {
-                current_section.clear();
-                if (kv.count(key)) {
-                    char buf[192];
-                    snprintf(buf, sizeof(buf), "第 %d 行: 重复的顶层键: %s",
-                             line_no, key.c_str());
-                    err_msg = buf;
-                    return false;
-                }
-                kv[key] = unquote(value);
-            }
+        /* 弹出缩进 >= 当前行缩进的区块（dedent / 同级） */
+        while (!sections.empty() && sections.back().first >= (int)indent) {
+            sections.pop_back();
+        }
+
+        /* 孤儿缩进键: 有缩进但无任何所属区块 → 报错（与原行为一致） */
+        if (sections.empty() && indent > 0) {
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                     "第 %d 行: 缩进的键 '%s' 不属于任何区块 (顶层无对应键)",
+                     line_no, key.c_str());
+            err_msg = buf;
+            return false;
+        }
+
+        /* 拼接完整键路径: sec1.sec2.key (无区块时仅为 key) */
+        std::string full_key;
+        for (auto it = sections.begin(); it != sections.end(); ++it) {
+            full_key += it->second;
+            full_key += '.';
+        }
+        full_key += key;
+
+        if (value.empty()) {
+            /* 区块开始（无论缩进层级） */
+            sections.push_back({(int)indent, key});
         } else {
-            /* 嵌套键 */
-            if (current_section.empty()) {
-                char buf[192];
-                snprintf(buf, sizeof(buf),
-                         "第 %d 行: 缩进的键 '%s' 不属于任何区块 (顶层无对应键)",
-                         line_no, key.c_str());
-                err_msg = buf;
-                return false;
-            }
-            if (value.empty()) {
-                /* 不支持更深层嵌套 */
-                char buf[192];
-                snprintf(buf, sizeof(buf),
-                         "第 %d 行: 不支持两层以上嵌套: %s.%s",
-                         line_no, current_section.c_str(), key.c_str());
-                err_msg = buf;
-                return false;
-            }
-            std::string full_key = current_section + "." + key;
             if (kv.count(full_key)) {
                 char buf[192];
                 snprintf(buf, sizeof(buf), "第 %d 行: 重复的键: %s",
@@ -272,6 +267,43 @@ bool AppConfig::loadFromFile(const std::string& path, std::string& err_msg)
         else if (key == "lite3_heartbeat.interval_ms") { if (!toInt(val, lite3_heartbeat_ms)) return failType(nullptr); }
         else if (key == "status.poll_hz")     { if (!toInt(val, status_poll_hz)) return failType(nullptr); }
         else if (key == "log.queue_size")     { if (!toInt(val, log_queue_size)) return failType(nullptr); }
+        /* ── Agora (RTSA) 音视频 + 信令 ── */
+        else if (key == "agora.enabled")        { if (!toBool(val, agora.enabled)) return failType(nullptr); }
+        else if (key == "agora.app_id")         agora.app_id = val;
+        else if (key == "agora.license")        agora.license = val;
+        else if (key == "agora.area_code")      agora.area_code = val;
+        else if (key == "agora.log_level")      { if (!toInt(val, agora.log_level)) return failType(nullptr); }
+        else if (key == "agora.rtm.enabled")        { if (!toBool(val, agora.rtm.enabled)) return failType(nullptr); }
+        else if (key == "agora.rtm.uid")            agora.rtm.uid = val;
+        else if (key == "agora.rtm.token")          agora.rtm.token = val;
+        else if (key == "agora.rtm.mode")           agora.rtm.mode = val;
+        else if (key == "agora.rtm.channel")        agora.rtm.channel = val;
+        else if (key == "agora.rtm.operator_uid")   agora.rtm.operator_uid = val;
+        else if (key == "agora.rtm.ack_enabled")    { if (!toBool(val, agora.rtm.ack_enabled)) return failType(nullptr); }
+        else if (key == "agora.rtsa.channel")        agora.rtsa.channel = val;
+        else if (key == "agora.rtsa.uid")            { if (!toInt(val, agora.rtsa.uid)) return failType(nullptr); }
+        else if (key == "agora.rtsa.token")          agora.rtsa.token = val;
+        else if (key == "agora.rtsa.token_renew")    { if (!toBool(val, agora.rtsa.token_renew)) return failType(nullptr); }
+        else if (key == "agora.rtsa.rtcm_signaling") { if (!toBool(val, agora.rtsa.rtcm_signaling)) return failType(nullptr); }
+        else if (key == "agora.rtsa.auto_join")      { if (!toBool(val, agora.rtsa.auto_join)) return failType(nullptr); }
+        else if (key == "agora.rtsa.subscribe")      { if (!toBool(val, agora.rtsa.subscribe)) return failType(nullptr); }
+        else if (key == "agora.video.enabled")       { if (!toBool(val, agora.video.enabled)) return failType(nullptr); }
+        else if (key == "agora.video.device")        agora.video.device = val;
+        else if (key == "agora.video.mode")          agora.video.mode = val;
+        else if (key == "agora.video.width")         { if (!toInt(val, agora.video.width)) return failType(nullptr); }
+        else if (key == "agora.video.height")        { if (!toInt(val, agora.video.height)) return failType(nullptr); }
+        else if (key == "agora.video.fps")           { if (!toInt(val, agora.video.fps)) return failType(nullptr); }
+        else if (key == "agora.video.bitrate_kbps")  { if (!toInt(val, agora.video.bitrate_kbps)) return failType(nullptr); }
+        else if (key == "agora.video.gop")           { if (!toInt(val, agora.video.gop)) return failType(nullptr); }
+        else if (key == "agora.audio.enabled")       { if (!toBool(val, agora.audio.enabled)) return failType(nullptr); }
+        else if (key == "agora.audio.device_in")     agora.audio.device_in = val;
+        else if (key == "agora.audio.device_out")    agora.audio.device_out = val;
+        else if (key == "agora.audio.sample_rate")   { if (!toInt(val, agora.audio.sample_rate)) return failType(nullptr); }
+        else if (key == "agora.audio.channels")      { if (!toInt(val, agora.audio.channels)) return failType(nullptr); }
+        else if (key == "agora.audio.frame_ms")      { if (!toInt(val, agora.audio.frame_ms)) return failType(nullptr); }
+        else if (key == "agora.audio.play_sample_rate") { if (!toInt(val, agora.audio.play_sample_rate)) return failType(nullptr); }
+        else if (key == "agora.audio.listen")           { if (!toBool(val, agora.audio.listen)) return failType(nullptr); }
+        else if (key == "agora.vad.enabled")         { if (!toBool(val, agora.vad_enabled)) return failType(nullptr); }
         else {
             err_msg = "未知的配置项: " + key;
             return false;
@@ -411,6 +443,91 @@ bool AppConfig::validate(std::string& err_msg) const
         err_msg = "log.queue_size 必须在 5-100";
         return false;
     }
+
+    /* ── Agora (RTSA) 配置校验（仅总开关开启时） ── */
+    if (agora.enabled) {
+        if (agora.app_id.empty()) {
+            err_msg = "agora.enabled=true 时 agora.app_id 不能为空";
+            return false;
+        }
+        if (agora.area_code != "CN" && agora.area_code != "GLOB" && agora.area_code != "NA" &&
+            agora.area_code != "EU" && agora.area_code != "AS" && agora.area_code != "JP") {
+            err_msg = "agora.area_code 必须是 CN/GLOB/NA/EU/AS/JP 之一，当前: " + agora.area_code;
+            return false;
+        }
+        if (agora.log_level < -1 || agora.log_level > 8) {
+            err_msg = "agora.log_level 必须在 -1 ~ 8";
+            return false;
+        }
+        if (agora.rtm.enabled) {
+            if (agora.rtm.mode != "peer" && agora.rtm.mode != "channel" && agora.rtm.mode != "both") {
+                err_msg = "agora.rtm.mode 必须是 peer / channel / both，当前: " + agora.rtm.mode;
+                return false;
+            }
+            if (agora.rtm.uid.empty()) {
+                err_msg = "agora.rtm.uid 不能为空";
+                return false;
+            }
+            if ((agora.rtm.mode == "peer" || agora.rtm.mode == "both") && agora.rtm.operator_uid.empty()) {
+                err_msg = "agora.rtm.operator_uid 不能为空 (peer/both 模式)";
+                return false;
+            }
+            if ((agora.rtm.mode == "channel" || agora.rtm.mode == "both") && agora.rtm.channel.empty()) {
+                err_msg = "agora.rtm.channel 不能为空 (channel/both 模式)";
+                return false;
+            }
+        }
+        if (agora.rtsa.uid < 0 || (unsigned)agora.rtsa.uid > 0xFFFFFFFEu) {
+            err_msg = "agora.rtsa.uid 必须在 0 ~ 4294967294";
+            return false;
+        }
+        if (agora.video.enabled) {
+            if (agora.video.mode != "h264" && agora.video.mode != "yuv") {
+                err_msg = "agora.video.mode 必须是 h264 / yuv，当前: " + agora.video.mode;
+                return false;
+            }
+            if (agora.video.device.empty()) {
+                err_msg = "agora.video.device 不能为空";
+                return false;
+            }
+            if (agora.video.width < 176 || agora.video.width > 1920 ||
+                agora.video.height < 144 || agora.video.height > 1080) {
+                err_msg = "agora.video.width/height 超出支持范围 (176x144 ~ 1920x1080)";
+                return false;
+            }
+            if (agora.video.width % 16 != 0 || agora.video.height % 16 != 0) {
+                err_msg = "agora.video.width/height 需 16 对齐 (MPP 编码要求)，建议 1280x720";
+                return false;
+            }
+            if (agora.video.fps < 5 || agora.video.fps > 60) {
+                err_msg = "agora.video.fps 必须在 5-60";
+                return false;
+            }
+            if (agora.video.bitrate_kbps < 200 || agora.video.bitrate_kbps > 4000) {
+                err_msg = "agora.video.bitrate_kbps 必须在 200-4000";
+                return false;
+            }
+            if (agora.video.gop < 10 || agora.video.gop > 1000) {
+                err_msg = "agora.video.gop 必须在 10-1000";
+                return false;
+            }
+        }
+        if (agora.audio.enabled) {
+            if (agora.audio.sample_rate != 16000 && agora.audio.sample_rate != 8000 &&
+                agora.audio.sample_rate != 48000) {
+                err_msg = "agora.audio.sample_rate 仅支持 8000 / 16000 / 48000";
+                return false;
+            }
+            if (agora.audio.channels != 1) {
+                err_msg = "agora.audio.channels 仅支持 1 (单声道)";
+                return false;
+            }
+            if (agora.audio.frame_ms < 10 || agora.audio.frame_ms > 60) {
+                err_msg = "agora.audio.frame_ms 必须在 10-60 ms";
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -482,6 +599,48 @@ std::string AppConfig::dump() const
     os << "\n[状态/日志]\n";
     os << "status.poll_hz   = " << status_poll_hz << "\n";
     os << "log.queue_size   = " << log_queue_size << "\n";
+
+    os << "\n[Agora RTSA 音视频+信令]\n";
+    os << "agora.enabled    = " << (agora.enabled ? "true" : "false") << "\n";
+    if (agora.enabled) {
+        os << "agora.app_id     = " << (agora.app_id.empty() ? "(空)" : agora.app_id) << "\n";
+        os << "agora.license    = " << (agora.license.empty() ? "(空)" : "******") << "\n";
+        os << "agora.area_code  = " << agora.area_code << "\n";
+        os << "agora.log_level  = " << agora.log_level << "\n";
+        os << "agora.rtm.enabled = " << (agora.rtm.enabled ? "true" : "false") << "\n";
+        if (agora.rtm.enabled) {
+            os << "agora.rtm.uid    = " << agora.rtm.uid << "\n";
+            os << "agora.rtm.token  = " << (agora.rtm.token.empty() ? "(空)" : "******") << "\n";
+            os << "agora.rtm.mode   = " << agora.rtm.mode << "\n";
+            os << "agora.rtm.channel = " << agora.rtm.channel << "\n";
+            os << "agora.rtm.operator_uid = " << agora.rtm.operator_uid << "\n";
+            os << "agora.rtm.ack_enabled = " << (agora.rtm.ack_enabled ? "true" : "false") << "\n";
+        }
+        os << "agora.rtsa.channel = " << agora.rtsa.channel << "\n";
+        os << "agora.rtsa.uid    = " << agora.rtsa.uid << "\n";
+        os << "agora.rtsa.token  = " << (agora.rtsa.token.empty() ? "(空)" : "******") << "\n";
+        os << "agora.rtsa.token_renew = " << (agora.rtsa.token_renew ? "true" : "false") << "\n";
+        os << "agora.rtsa.rtcm_signaling = " << (agora.rtsa.rtcm_signaling ? "true" : "false") << "\n";
+        os << "agora.rtsa.auto_join = " << (agora.rtsa.auto_join ? "true" : "false") << "\n";
+        os << "agora.rtsa.subscribe = " << (agora.rtsa.subscribe ? "true" : "false") << "\n";
+        os << "agora.video.enabled = " << (agora.video.enabled ? "true" : "false") << "\n";
+        if (agora.video.enabled) {
+            os << "agora.video.device  = " << agora.video.device << "\n";
+            os << "agora.video.mode    = " << agora.video.mode << "\n";
+            os << "agora.video.size    = " << agora.video.width << "x" << agora.video.height
+               << "@" << agora.video.fps << "\n";
+            os << "agora.video.bitrate = " << agora.video.bitrate_kbps << " kbps, gop="
+               << agora.video.gop << "\n";
+        }
+        os << "agora.audio.enabled = " << (agora.audio.enabled ? "true" : "false") << "\n";
+        if (agora.audio.enabled) {
+            os << "agora.audio.device_in  = " << agora.audio.device_in << "\n";
+            os << "agora.audio.device_out = " << agora.audio.device_out << "\n";
+            os << "agora.audio.format     = " << agora.audio.sample_rate << "Hz/"
+               << agora.audio.channels << "ch/" << agora.audio.frame_ms << "ms\n";
+        }
+        os << "agora.vad.enabled = " << (agora.vad_enabled ? "true (预留)" : "false") << "\n";
+    }
 
     return os.str();
 }

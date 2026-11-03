@@ -1,109 +1,105 @@
 # 灵境具身机器人控制服务端
 
-双设备机器人控制服务端：支持 **云迹 SC668s** 与 **云深处绝影 Lite3**，并在现有 TCP 控制架构上完整接入 Lite3 运动主机通讯接口 **V1.0.7** 的指定功能，
-             Lite3 控制采用 UDP、小端字节序，运动主机控制端口为 43893；运动主机上报信息需要将目标地址配置到开发主机后，由本机 UDP 接收端口 43897 接收。
+本项目是运行在边缘计算设备（如云迹 SC668s、云深处 Lite3、RK3588 等）上的机器人综合控制服务端。系统采用高度模块化的 C++ 架构，不仅实现了对多品牌机器人的底层运动控制、
+多协议网络通信（TCP/MQTT），还深度集成了声网 (Agora) RTSA SDK，提供低延迟的实时音视频推流与双向信令能力。
+**V1.0.7** 的指定功能，Lite3 控制采用 UDP、小端字节序，运动主机控制端口为 43893；运动主机上报信息需要将目标地址配置到开发主机后，由本机 UDP 接收端口 43897 接收。
 
-## 1. 架构总览
+## 1. 核心架构设计
 
+系统采用**五维解耦**架构（网络层、信令桥接层、指令解析层、设备驱动层、音视频媒体层），支持多网络协议接入与多设备并发控制。
+
+### 1.1 架构总览
+
+```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                         外部控制端 / 上位机 / 云端                           │
+│                         外部控制端 / 上位机 / 云端                            │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│   TCP Client                 TCP Client                  MQTT Client         │
-│   / WebSocket                控制端                      控制端              │
-│       │ JSON                    │ JSON                    │ PUB JSON         │
-│       ▼                         ▼                         ▼                  │
-└───────┬─────────────────────────┬─────────────────────────┬──────────────────┘
-        ▼                         ▼                         ▼
+│   TCP Client          TCP Server          MQTT Client          Agora Web端  	│
+│   (外部服务器)             (本地监听)              (发布/订阅)              (浏览器)			│
+│       │ JSON              │ JSON              │ JSON               │ RTC/RTM  │
+│       ▼                   ▼                   ▼                    ▼          │
+└───────┬───────────────────┬───────────────────┬────────────────────┬─────────┘
+        │                   │                   │                    │
+        ▼                   ▼                   ▼                    ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                    SC668S / Ubuntu 20.04  lljs_ctrl                          │
+│                    SC668S / RK3588 / Ubuntu 20.04  lljs_ctrl                 │
+│                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                         网络通信层                                     │  │
-│  │  ┌────────────────┐   ┌────────────────┐   ┌────────────────────────┐  │  │
-│  │  │   TCP Server   │   │   TCP Client   │   │    MQTT Server/Broker  │  │  │
-│  │  │                │   │                │   │    Mosquitto           │  │  │
-│  │  │ listen :9000   │   │ 主动连接外部   │   │ listen :1883           │  │  │
-│  │  │ 接收 JSON      │   │ TCP Server     │   │ 接收其它 MQTT Client   │  │  │
-│  │  └───────┬────────┘   └───────┬────────┘   └──────────┬─────────────┘  │  │
-│  │          │ JSON               │ JSON                  │ MQTT PUB       │  │
-│  │          └────────────────────┼───────────────────────┘                │  │
-│  │                               ▼                                        │  │
-│  │                    ┌──────────────────────┐                            │  │
-│  │                    │ MQTT Client          │                            │  │
-│  │                    │ mqtt_client.cpp      │                            │  │
-│  │                    │ libmosquitto.so      │                            │  │
-│  │                    │                      │                            │  │
-│  │                    │ SUB / PUB            │                            │  │
-│  │                    └──────────┬───────────┘                            │  │
-│  └───────────────────────────────┼────────────────────────────────────────┘  │
-│                                  │ 统一 JSON 指令                            │
-│                                  ▼                                           │
+│  │                         网络通信与信令桥接层                           │  │
+│  │  ┌───────────────┐   ┌───────────────┐   ┌──────────────────────────┐  │  │
+│  │  │ Tcp Client    │   │ TcpServer     │   │ MQTT (Mosquitto)         │  │  │
+│  │  │               │   │ listen :9000  │   │ Broker + Client listen :1883│  │  │
+│  │  └───────┬───────┘   └───────┬───────┘   └──────────┬───────────────┘  │  │
+│  │          │                   │                      │                  │  │
+│  │  ┌───────┴───────────────────┴──────────────────────┴───────────────┐  │  │
+│  │  │                        Agora Bridge                              │  │  │
+│  │  │  (负责拦截 av_* 指令，转发 RTM/RTCM 数据，管理音视频生命周期)    │  │  │
+│  │  └───────────────────────────────┬──────────────────────────────────┘  │  │
+│  └──────────────────────────────────┼─────────────────────────────────────┘  │
+│                                     │ 统一 JSON 指令                         │
+│                                     ▼                                        │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                     指令解析与中间层                                   │  │
+│  │                     指令解析与分发中间层                               │  │
 │  │  ┌─────────────────────┐        ┌───────────────────────────────────┐  │  │
-│  │  │    输入适配器       │        │          CmdTranslator            │  │  │
-│  │  │                     │───────►│                                   │  │  │
-│  │  │ JSON / WASD         │        │ JSON → 标准设备指令               │  │  │
-│  │  │ 键盘控制            │        │ 设备选择 / 参数转换 / 指令分发    │  │  │
-│  │  │ 协议兼容            │        │ Lite3 / SC668S                    │  │  │
+│  │  │ InputAdapter        │        │          CmdTranslator            │  │  │
+│  │  │ (统一解析 JSON/WASD)│───────►│ (设备路由、限幅、状态同步)        │  │  │
 │  │  └─────────────────────┘        └────────────────┬──────────────────┘  │  │
 │  └──────────────────────────────────────────────────┼─────────────────────┘  │
-│                                                     │                        │
-│                                                     │ 设备指令               │
-│                                                     ▼                        │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                         设备适配层                                     │  │
+│                                                     │ 设备底层指令           │
+│  ┌──────────────────────────────────────────────────┼─────────────────────┐  │
+│  │                         设备适配层               ▼                     │  │
 │  │       ┌────────────────────────┐       ┌────────────────────────────┐  │  │
 │  │       │      Lite3Driver       │       │       Yunji Driver         │  │  │
-│  │       │                        │       │                            │  │  │
-│  │       │ UDP                    │       │ TCP / 设备 API             │  │  │
-│  │       │ Lite3 V1.0.7           │       │ 云迹机器人                 │  │  │
-│  │       │ 指令码                 │       │                            │  │  │
-│  │       └───────────┬────────────┘       └────────────────────────────┘  │  │
-│  └───────────────────┼─────────────────────────────────┼──────────────────┘  │
-└──────────────────────┼─────────────────────────────────┼─────────────────────┘
+│  │       │ UDP (V1.0.7 二进制)    │       │ TCP (JSON/URL)             │  │  │
+│  │       └────────────────────────┘       └────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                        音视频媒体层 (Agora)                            │  │
+│  │  [V4L2 采集]──(YUYV/NV12)──►[MPP 硬编码]──(H.264)──┐                   │  │
+│  │                                                    ├─►[RTSA SDK]──►云端 │  │
+│  │  [ALSA 采集]──(PCM 16k)────────────────────────────┘                   │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────┬─────────────────────────────────┬─────────────────────┘
                        │ UDP                             │ TCP
                        ▼                                 ▼
               ┌──────────────────────┐              ┌──────────────────────┐
-              │       Lite3          │              │                      │
-              │    绝影运动主机      │              │    Yunji运动主机     │
-              │                      │              │  接收控制指令        │
-              │  接收控制指令        │              │  发送机器人状态      │
-              │  发送机器人状态      │              └──────────────────────┘
-              └──────────┬───────────┘
-                         │ UDP Telemetry
+              │       Lite3          │              │    Yunji运动主机     │
+              │    绝影运动主机      │              │  接收控制指令        │
+              │  发送机器人状态      │              │  发送机器人状态      │
+              └──────────┬───────────┘              └──────────────────────┘
+                         │ UDP Telemetry (0901:Robot State/0902:Joint Angle/0903:Joint Velocity )
                          ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                         lljs_ctrl 状态处理                                       │
-│                                                                              │
-│       0901 Robot State       0902 Joint Angle       0903 Joint Velocity      │
-│              │                       │                       │               │
-│              └───────────────────────┼───────────────────────┘               │
-│                                      ▼                                       │
-│                              状态解析 / 缓存                                       │
+│                         lljs_ctrl 状态分发处理                               │
+│                              状态解析 / 缓存                                 │
 │                         ┌────────────┴────────────┐                          │
-│                         │                         │                          │
 │                         ▼                         ▼                          │
-│                    TCP Telemetry            MQTT PUB                         │
-│                                               │                              │
+│                    TCP Telemetry            MQTT PUB / Agora RTM             │
 │                                               ▼                              │
 │                                    device/telemetry                          │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-### 网络通道
-三种外部网络方式
+核心架构特点：
 
-目前最大的架构特点是：TCP Server、TCP Client、MQTT(Broker/Client) 可以同时存在，而且通过配置独立控制
-它们最终都进入同一套指令处理链路，不会因为网络协议不同而产生三套业务逻辑
-MQTT 部分采用“双角色”， MQTT Broker/Server + MQTT Client
+1.四路网络并行：TCP Client、TCP Server、MQTT、Agora RTM 可同时工作，互不干扰。
 
-### 统一指令处理链
+2.Agora 双重身份：
+	信令通道：作为第四路网络接入，接收业务 JSON 和 av_* 专属控制指令。
+	媒体通道：独立运作的音视频推流管线（采集 -> 硬编 -> 推流）。
+
+3. 底层状态回传：机器人通过 UDP 拿到的实时状态（0109等），最终由系统统一切片，通过 TCP、MQTT 和 Agora RTM 实时广播给所有连接的终端。
+
+### 1.2 统一指令处理链
+	无论是通过 TCP、MQTT 还是声网的 RTM 通道，所有外部控制指令最终都会统一进入同一套处理链路，确保业务行为一致。
+
              TCP Server
                  │
              TCP Client
                  │
-          MQTT Broker
+          MQTT (Broker/Client)
                  │
-          MQTT Client
+             Agora RTM
                  │
                  ▼
         ┌─────────────────┐
@@ -111,11 +107,15 @@ MQTT 部分采用“双角色”， MQTT Broker/Server + MQTT Client
         └────────┬────────┘
                  ▼
         ┌─────────────────┐
-        │ Input Adapter   │
+        │ AgoraBridge     │ ── 若为 av_* 指令，就地拦截并执行
         └────────┬────────┘
                  ▼
         ┌─────────────────┐
-        │ CmdTranslator   │
+        │ Input Adapter   │ (解析设备类型与动作)
+        └────────┬────────┘
+                 ▼
+        ┌─────────────────┐
+        │ CmdTranslator   │ (多设备路由与限幅处理)
         └────────┬────────┘
                  ▼
           Device Manager
@@ -124,63 +124,99 @@ MQTT 部分采用“双角色”， MQTT Broker/Server + MQTT Client
           ▼             ▼
      Lite3Driver    SC668S Driver
 
+
 ## 2. 工程结构
-
-```text
 ljjs_robot_control/
-├── CMakeLists.txt
-├── Makefile
+├── CMakeLists.txt                  # 主构建脚本 (LLJS_WITH_AGORA 开关)
+├── Makefile                        # 快捷构建 (make AGORA=1)
 ├── README.md
-├── LITE3_V1.0.7_CHANGELOG.md
 ├── config/
-│   └── config.yaml				# YAML 配置文件模板
+│   └── config.yaml                 # 全量 YAML 配置文件模板
+├── docs/
+│   ├── AGORA_INTEGRATION.md        # Agora 集成方案与验证记录
+│   └── DEPLOY.md                   # 部署说明
 ├── scripts/
-│   ├── build.sh				# 编译脚本
-│   ├── run.sh					# 运行脚本
-│   └── fetch_mosquitto_ubuntu20.sh		# 获取 Ubuntu 20.04 对应 Mosquitto Broker + libmosquitto
+│   ├── build.sh                    # 编译脚本
+│   ├── deploy.sh                   # 打包产物并部署到板端
+│   ├── run.sh                      # 运行脚本
+│   └── prepare_agora_env.sh        # 准备 Agora/MPP 编译环境
 ├── include/
-│   └── mosquitto.h			# Mosquitto libmosquitto API 头文件
-├── lib/				# Eclipse Mosquitto 官方动态库（目标平台对应架构）
-├   └──x86_64/
-│        ├── libmosquitto.so -> libmosquitto.so.1.6.9
-│        ├── libmosquitto.so.1 -> libmosquitto.so.1.6.9
-│        └── libmosquitto.so.1.6.9
+│   └── mosquitto.h                 # Mosquitto 头文件
+├── lib/                            # 第三方动态库（按架构划分）
 │   └── aarch64/
-│        ├── libmosquitto.so -> libmosquitto.so.1.6.9
-│        ├── libmosquitto.so.1 -> libmosquitto.so.1.6.9
-│        └── libmosquitto.so.1.6.9
-│   ├── README_MOSQUITTO.md			# Mosquitto 依赖说明
-│   └── MOSQUITTO_BINARY_NOTE.txt
+│        ├── libmosquitto.so
+│        └── libagora-rtc-sdk.so
 ├── bin/
-│   └── mosquitto				# 官方 Mosquitto Broker 可执行文件（脚本获取/目标机安装）
+│   └── mosquitto                   # 官方 Mosquitto Broker 可执行文件
+├── third_party/                    # 第三方依赖头文件（按需拷入）
+│   ├── agora_sdk/                  # 声网 RTSA-Lite SDK
+│   ├── alsa/                       # ALSA 音频头文件
+│   └── rockchip_mpp/               # RK MPP 硬编头文件
 ├── src/
-│   ├── main.cpp				# 程序入口
-│   ├── keyboard_control.h/.cpp			# 应用控制层 (Tab切换设备+双设备HUD)
-│   ├── network/				# ── 网络通信层 ──
-│   │   ├── tcp_client.h/.cpp           	# 云迹设备 TCP 客户端
-│   │   ├── tcp_server.h/.cpp           	# 外部控制端接入 TCP Server
-│   │   ├── tcp_control_client.h/.cpp   	# 本机作为客户端连接外部控制端 Server
-│   │   ├── mqtt_client.h/.cpp           	# libmosquitto MQTT Client：SUB/PUB
-│   │   └── mqtt_broker.h/.cpp           	# 官方 Mosquitto Broker 进程管理
-│   ├── control/                 		# ── 指令解析中间层 ──
-│   │   ├── input_adapter.h/.cpp 		# 输入适配器 (设备感知 WASD+JSON 解析)
-│   │   └── cmd_translator.h/.cpp 		# 指令翻译引擎 (多设备管理+设备感知执行)
-│   ├── device/					# ── 负责具体机器人协议 ── 
-│   │   ├── device_driver.h			# 设备适配层 —— 抽象接口 (多厂家兼容)
-│   │   ├── yunji_driver.h/.cpp
-│   │   └── lite3_driver.h/.cpp
-│   ├── config/                  		# ── 配置管理 ──
-│   │   ├── yaml_config.h/.cpp   		# YAML 解析器 + AppConfig 结构体
-│   │   └── config.h             		# 编译期协议常量 (Lite3 指令码)
-│   └── util/                    		# ── 工具库：负责协议和设备测试 ──
-│       ├── log.h / log.cpp      		# 日志模块
-│       └── json.h / json.cpp    		# JSON 解析器
+│   ├── main.cpp                    # 程序入口，管理生命周期
+│   ├── keyboard_control.h/.cpp     # 应用控制层 (Tab切换设备+双设备HUD)
+│   ├── network/                    # ── 网络通信层 ──
+│   │   ├── tcp_client.h/.cpp       # 云迹设备 TCP 客户端
+│   │   ├── tcp_server.h/.cpp       # 外部控制端接入 TCP Server
+│   │   ├── tcp_control_client.h/.cpp # 本机作为客户端连接外部控制端
+│   │   ├── mqtt_client.h/.cpp      # libmosquitto MQTT Client
+│   │   └── mqtt_broker.h/.cpp      # 官方 Mosquitto Broker 进程管理
+│   ├── control/                    # ── 指令解析中间层 ──
+│   │   ├── input_adapter.h/.cpp    # 输入适配器 (WASD+JSON)
+│   │   └── cmd_translator.h/.cpp   # 指令翻译引擎 (多设备管理)
+│   ├── device/                     # ── 负责具体机器人协议 ──
+│   │   ├── device_driver.h         # 设备适配层抽象接口
+│   │   ├── yunji_driver.h/.cpp     # 云迹机器人驱动
+│   │   └── lite3_driver.h/.cpp     # 云深处 Lite3 驱动
+│   ├── agora/                      # ── Agora 音视频对讲 ──
+│   │   ├── agora_service.h/.cpp    # 核心生命周期与媒体管线
+│   │   ├── agora_bridge.h/.cpp     # av_* 指令拦截与遥测转发
+│   │   ├── v4l2_capture.h/.cpp     # UVC 摄像头采集
+│   │   ├── yuyv_convert.h/.cpp     # YUYV→NV12 软件转换
+│   │   ├── mpp_encoder.h/.cpp      # RK MPP H.264 硬编
+│   │   ├── alsa_capture.h/.cpp     # ALSA 麦克风采集
+│   │   ├── alsa_player.h/.cpp      # ALSA 下行对讲播放
+│   │   ├── av_pacer.h              # 视频发送节拍器
+│   │   └── av_source.h             # 媒体源抽象接口
+│   ├── config/                     # ── 配置管理 ──
+│   │   ├── yaml_config.h/.cpp      # YAML 解析器与结构体
+│   │   └── config.h                # 编译期协议常量 (Lite3 指令码)
+│   └── util/                       # ── 工具库 ──
+│       ├── log.h / log.cpp         # 日志模块
+│       └── json.h / json.cpp       # JSON 解析器
 └── test/
-    ├── test_client.py				# 测试客户端
-    ├── test_external_server.py			# 测试服务端
-    └── test_mqtt_publish.py			# MQTT QoS0 测试发布器（仅标准库）
-```
+    ├── web_demo_h264.html          # Web 拉流与双向对讲测试页
+    ├── agora_ab/                   # Agora 最小排障验证工具
+    ├── test_client.py              # TCP Server 测试客户端
+    ├── test_external_server.py     # TCP Client 测试服务端
+    ├── test_mqtt_publish.py        # MQTT 指令测试发布器
+    └── AGORA_WATCH_GUIDE.md        # 日志观测指南
 
+
+
+> **构建依赖**：`third_party/agora_sdk`（声网 SDK）、`third_party/alsa`、`third_party/rockchip_mpp`，
+> 由 `scripts/prepare_agora_env.sh` 从板端/官方包准备；Mosquitto 依赖见 `lib/README_MOSQUITTO.md`。
+
+2. 核心模块说明
+device/ (设备驱动层)：
+	IDeviceDriver: 统一抽象接口，屏蔽不同厂商机器人的硬件差异。
+	Lite3Driver: 云深处四足机器狗驱动，基于 UDP 二进制指令码，内置 20ms 心跳保活和状态接收多线程。
+	YunjiDriver: 云迹服务机器人驱动，基于 TCP URL 字符串指令。
+
+control/ (指令翻译层)：
+	InputAdapter: 负责将外部输入的文本、单字符（WASD）或 JSON 解析为统一的 InputCommand。
+	CmdTranslator: 多设备管理器，根据指令目标动态分发给对应的设备驱动；包含 WASD 速度积分逻辑。
+
+network/ (网络通信层)：
+	TcpServer: 监听外部控制端连接，支持多客户端并发接入。
+	TcpControlClient: 作为客户端连接外部中心服务器，断线自动重连。
+	MqttClient / MqttBroker: 支持接入外部 MQTT 或自带内置 Mosquitto 进程。统一通过 device/command/# 和 device/telemetry 收发业务。
+
+agora/ (音视频与信令层)：
+	AgoraService: 封装声网 RTSA 生命周期，管理 V4L2 (采集) + MPP (硬编) + ALSA (音频)，处理 SDK 关键帧请求、带宽自适应等回调。
+	AgoraBridge: 拦截并处理 av_* 专属指令（如入会、开关视频），同时转发业务遥测数据至 RTM/RTCM 通道。
+	视频：自动适配 V4L2 格式（若摄像头输出 YUYV 则自动软转 NV12），随后送入 RK3588 的 MPP 硬件编码器输出 H.264。支持动态码率调整与强制 I 帧。
+	音频：通过 ALSA 采集 16kHz/单声道 PCM，交由声网 SDK 内置 Opus 编码推流。支持下行播放（对讲），内置环形缓冲区消除网络抖动。
 ---
 
 ## 3. 支持设备
@@ -190,8 +226,6 @@ ljjs_robot_control/
 | Lite3 | 云深处 | UDP (二进制指令码) | 192.168.2.1:43893 | 模式切换/离散移动/特殊动作/20ms心跳 |
 
 ## 设备感知按键映射
-
-同一按键在不同设备上含义不同，**Tab 键切换激活设备**：
 
 ### 通用按键 (两个设备一致)
 
@@ -203,20 +237,6 @@ ljjs_robot_control/
 | H | 帮助 | 帮助 |
 | Q | 退出 | 退出 |
 | Tab | 切换设备 | 切换设备 |
-
-### 云迹专用按键 (激活云迹时)
-
-| 键 | 功能 |
-|----|------|
-| A / D | 左转 / 右转 (角速度递增) |
-| X | 急停 |
-| Z | 解除急停 |
-| C | 取消移动 |
-| M | 导航到点位 |
-| L | 查询点位列表 |
-| R | 刷新状态 |
-| P | 查询电源 |
-| V | 查询版本 |
 
 ### Lite3 专用按键 (激活 Lite3 时)
 
@@ -237,10 +257,79 @@ ljjs_robot_control/
 | R | 后转180° | voice 15 |
 | F | 停止 (同空格) | voice 7 |
 
+###3. JSON 协议与操作指令全集
+外部控制端可通过任意网络通道（TCP / MQTT / Agora RTM）下发以下 JSON 指令。若未填写 device 字段，默认发往当前“激活设备”；
+   指定 "device":"lite3" 或 "device":"yunji" 可强制发往特定设备；指定 "device":"all" 发往所有已连接设备
+###3.1 通用控制与设备切换
+// 切换当前激活设备 (在 yunji 和 lite3 之间切换)
+{"cmd":"switch_device"}
+
+###3.2 云深处 (Lite3) 专属指令
+// 模式切换 (stand:站立, move:移动, inplace:原地, auto:自主, manual:手动)
+{"cmd":"mode","mode":"stand","device":"lite3"}
+
+// 离散动作控制 (底层通过语音指令码实现)
+{"cmd":"action","action":"forward","device":"lite3"}       // 前进
+{"cmd":"action","action":"backward","device":"lite3"}      // 后退
+{"cmd":"action","action":"strafe_left","device":"lite3"}   // 左平移
+{"cmd":"action","action":"strafe_right","device":"lite3"}  // 右平移
+{"cmd":"action","action":"stop","device":"lite3"}          // 停止
+{"cmd":"action","action":"greet","device":"lite3"}         // 打招呼
+{"cmd":"action","action":"jump","device":"lite3"}          // 跳跃
+{"cmd":"action","action":"twist","device":"lite3"}         // 扭身体
+{"cmd":"action","action":"turn_left_90","device":"lite3"}  // 左转90度
+{"cmd":"action","action":"turn_right_90","device":"lite3"} // 右转90度
+{"cmd":"action","action":"turn_180","device":"lite3"}      // 后转180度
+
+// 轴连续控制 (支持 20Hz 持续发送，死区外生效)
+value 取值范围为[-32767,32767]， 当轴指令取值在死区范围内时，视其值为 0，机器人停止移动。轴指令值的正负确定速度方向
+{"cmd":"axis","axis":"x","value":30000,"device":"lite3"}    // 前后平移 (正前负后，死区±6553) 指定机器人 x 轴上的期望线速度，正值向前
+{"cmd":"axis","axis":"y","value":20000,"device":"lite3"}    // 左右平移 (正右负左，死区±12553) 指定机器人 y 轴上的期望线速度，正值向右
+{"cmd":"axis","axis":"yaw","value":10000,"device":"lite3"}  // 左右旋转 (正右负左，死区±9553) 指定机器人的期望角速度，正值向右转
+{"cmd":"axis","axis":"height","value":1000,"device":"lite3"}// 身体高度 (仅原地模式，死区±20000) 取正值时抬高身体
+
+**注意：轴指令由 Lite3Driver 独立线程以 **50ms / 20Hz** 周期持续发送当前轴值。停止/急停时清零轴值并停止### 3.2 步态
+
+// 步态切换
+{"cmd":"gait","gait":"low","device":"lite3"}       // 慢速
+{"cmd":"gait","gait":"medium","device":"lite3"}    // 中速
+{"cmd":"gait","gait":"high","device":"lite3"}      // 高速
+{"cmd":"gait","gait":"crawl","device":"lite3"}     // 爬行
+{"cmd":"gait","gait":"grip","device":"lite3"}      // 抓地
+{"cmd":"gait","gait":"general","device":"lite3"}   // 通用
+{"cmd":"gait","gait":"high_step","device":"lite3"} // 高抬腿
+
+// 自主模式速度控制 (范围: vx[-1,1]m/s, vy[-0.5,0.5]m/s, yaw[-1.5,1.5]rad/s)
+{"cmd":"velocity","vx":0.3,"vy":0.0,"yaw":0.1,"device":"lite3"}
+
+**注意：速度指令要求机器人处于自主模式。测试工具在速度测试前会发送 `mode=auto`。
+
+// 高级动作
+{"cmd":"continuous_motion","enabled":true,"device":"lite3"}  // 持续运动 (未受指令时原地踏步)
+**注意：持续运动开启后，机器人在未收到轴指令时也将保持原地踏步。
+
+{"cmd":"save_data","device":"lite3"}                         // ⚠️ 保存故障数据并关闭运动程序 (高风险)
+**注意：保存数据 动作 这是高风险测试项。** 按 V1.0.7 接口语义，该指令用于保存故障数据并关闭运动程序。测试工具默认要求输入 `YES` 二次确认。
+
+###3.3 声网 (Agora) 音视频专属指令
+// 加入音视频频道
+{"cmd":"av_join","channel":"testChannel","uid":1001,"token":"你的Token(可选)"}
+
+// 退出频道
+{"cmd":"av_leave"}
+
+// 流开关控制
+{"cmd":"av_video","enabled":true}   // 开/关视频推流
+{"cmd":"av_audio","enabled":true}   // 开/关麦克风推流
+{"cmd":"av_listen","enabled":true}  // 开/关下行对讲播放
+
+// 状态查询
+{"cmd":"av_status"}
+   
+
 ## 4. MQTT 通信
 
 ### MQTT 角色
-
 `lljs_ctrl` 支持两个独立的 MQTT 角色：
 
 1. **MQTT Broker / Server**：由 `MqttBroker` 管理官方 Mosquitto Broker 进程，允许其它 MQTT Client 连接、PUB、SUB。
@@ -249,11 +338,9 @@ ljjs_robot_control/
 当 `mqtt.broker_enabled=true` 时，即使 `mqtt.client_enabled=false`，`lljs_ctrl` 仍会自动建立内部 MQTT Client 连接本机 Broker，用于接收其它客户端发送的控制 JSON。
 
 ### Topic 设计
-
 MQTT Topic 统一由 `src/network/mqtt_client.cpp` 管理，所有业务 Topic 均以 `device/` 开头。
 
 默认 Topic：
-
 ```text
 SUB: device/command/#
 PUB: device/telemetry
@@ -268,33 +355,6 @@ device/command/lite3/axis
 device/command/lite3/gait
 device/command/yunji
 ```
-
-### 配置
-
-```yaml
-network:
-  server_enabled: false
-  client_enabled: true
-  mqtt_enabled: false
-
-mqtt:
-  broker_enabled: false
-  broker_bind: "0.0.0.0"
-  broker_port: 1883
-  broker_executable: ""
-  broker_config: "/tmp/lljs_ctrl_mosquitto.conf"
-  broker_allow_anonymous: true
-
-  client_enabled: false
-  host: "127.0.0.1"
-  port: 1883
-  client_id: "lljs_ctrl"
-  username: ""
-  password: ""
-  reconnect_interval_ms: 5000
-```
-
-注意：配置文件中已经**没有 `subscribe_topic` / `publish_topic`**。
 
 ### MQTT 控制消息
 
@@ -317,31 +377,15 @@ device/command/lite3
 device/command/lite3/axis
 ```
 
-消息仍然统一进入：
-
-```text
-Mosquitto Broker
-      ↓
-lljs_ctrl MQTT Client (SUB device/command/#)
-      ↓
-InputAdapter
-      ↓
-CmdTranslator
-      ↓
-DeviceDriver
-```
-
 ### MQTT Telemetry
 
 Lite3 的 `0x0901/0x0902/0x0903` 最新状态由 lljs_ctrl 发布到：
 
-```text
 device/telemetry
 ```
 
 其它 MQTT Client 可以：
 
-```text
 SUB device/telemetry
 ```
 
@@ -360,107 +404,6 @@ python3 test/test_mqtt_publish.py 127.0.0.1 1883 device/command '{"cmd":"mode","
 ```bash
 make mqtt-pub HOST=127.0.0.1 PORT=1883 TOPIC=device/command PAYLOAD='{"cmd":"mode","mode":"stand","device":"lite3"}'
 ```
-
-## JSON 协议
-
-### 设备指定
-```json
-{"cmd":"switch_device"}
-{"cmd":"mode","mode":"stand","device":"lite3"}
-{"cmd":"action","action":"greet","device":"lite3"}
-```
-
-`device` 字段可选: `"yunji"` / `"lite3"` / `"all"` / 不填(=激活设备)
-
-### 模式切换 (Lite3)
-```json
-{"cmd":"mode","mode":"stand"}
-{"cmd":"mode","mode":"move"}
-{"cmd":"mode","mode":"manual"}
-{"cmd":"mode","mode":"auto"}
-{"cmd":"mode","mode":"inplace"}
-```
-
-### 执行动作 (Lite3)
-```json
-{"cmd":"action","action":"forward"}
-{"cmd":"action","action":"backward"}
-{"cmd":"action","action":"strafe_left"}
-{"cmd":"action","action":"strafe_right"}
-{"cmd":"action","action":"stop"}
-{"cmd":"action","action":"greet"}
-{"cmd":"action","action":"jump"}
-{"cmd":"action","action":"twist"}
-{"cmd":"action","action":"turn_left_90"}
-{"cmd":"action","action":"turn_right_90"}
-{"cmd":"action","action":"turn_180"}
-```
-Lite3 V1.0.7 已实现功能
-| 文档章节 | 功能 | TCP JSON 命令 | Lite3 UDP |
-|---|---|---|---|
-| 1.2.3 | 轴指令 | `axis` | `0x21010130/31/35` 等 |
-| 1.2.5 | 步态切换 | `gait` | `0x21010300` 等 |
-| 1.2.8 | 保存数据 | `save_data` | `0x21010C01` |
-| 1.2.9 | 持续运动 | `continuous_motion` | `0x21010C06` |
-| 1.2.12 | 导航速度 | `velocity` | `0x0141/0140/0145` |
-| 1.3.1 | 机器人状态 | `telemetry` | `0x0901` |
-| 1.3.2 | 关节信息 | `telemetry` | `0x0902/0903` |
-
-### 3.1 轴指令
-value 取值范围为[-32767,32767]， 当轴指令取值在死区范围内时，视其值为 0，机器人停止移动。轴指令值的正负确定速度方向
-```json
-{"cmd":"axis","axis":"x","value":30000,"device":"lite3"}		#前后平移 死区[-6553,6553] 指定机器人 x 轴上的期望线速度，正值向前
-{"cmd":"axis","axis":"y","value":20000,"device":"lite3"}		#左右平移 死区[-12553,12553] 指定机器人 y 轴上的期望线速度，正值向右
-{"cmd":"axis","axis":"yaw","value":10000,"device":"lite3"}		#左右转弯 死区[-9553,9553] 指定机器人的期望角速度，正值向右转
-{"cmd":"axis","axis":"height","value":1000,"device":"lite3"}	#【原地模式】身体高度 死区[-20000,20000] 取正值时抬高身体
-
-```
-轴指令由 Lite3Driver 独立线程以 **50ms / 20Hz** 周期持续发送当前轴值。停止/急停时清零轴值并停止轴控制。
-
-### 3.2 步态
-
-```json
-{"cmd":"gait","gait":"low","device":"lite3"}
-{"cmd":"gait","gait":"medium","device":"lite3"}
-{"cmd":"gait","gait":"high","device":"lite3"}
-{"cmd":"gait","gait":"crawl","device":"lite3"}
-{"cmd":"gait","gait":"grip","device":"lite3"}
-{"cmd":"gait","gait":"general","device":"lite3"}
-{"cmd":"gait","gait":"high_step","device":"lite3"}
-```
-
-### 3.3 保存数据
-
-```json
-{"cmd":"save_data","device":"lite3"}
-```
-
-**注意：这是高风险测试项。** 按 V1.0.7 接口语义，该指令用于保存故障数据并关闭运动程序。测试工具默认要求输入 `YES` 二次确认。
-
-### 3.4 持续运动
-持续运动开启后，机器人在未收到轴指令时也将保持原地踏步。
-```json
-{"cmd":"continuous_motion","enabled":true,"device":"lite3"}
-{"cmd":"continuous_motion","enabled":false,"device":"lite3"}
-```
-
-### 3.5 导航速度
-
-```json
-{"cmd":"velocity","vx":0.3,"vy":0.0,"yaw":0.1,"device":"lite3"}
-```
-
-对应关系：
-
-```text
-vx  → 0x0140，范围 [-1.0, 1.0] m/s
-vy  → 0x0145，范围 [-0.5, 0.5] m/s
-yaw → 0x0141，范围 [-1.5, 1.5] rad/s
-```
-
-速度指令要求机器人处于自主模式。测试工具在速度测试前会发送 `mode=auto`。
-
----
 
 ## 4. Lite3 状态接收
 
@@ -502,120 +445,196 @@ UDP 43897
 
 ---
 
-## 5. 配置
+### 5. 配置
 
 所有运行时参数通过 YAML 配置文件设定，模板见 `config/config.yaml`：
+# ── 全局配置 ──
+device: lite3            # 连接设备: yunji / lite3 / both
+log_level: info          # 日志级别: debug / info / warn / error
+default_active: ""       # 默认激活设备 (留空自动)
 
-```yaml
-device: lite3           			# 连接设备: yunji / lite3 / both
-log_level: info         			# 日志级别
-
-default_active: ""
-
+# ── 外部控制端网络通道 (可同时开启) ──
 network:
-  mode: client			 			# server / client
+  mode: client           # 兼容旧配置，建议使用下方独立开关
+  server_enabled: false  # 开启本机 TCP Server
+  client_enabled: true   # 开启本机 TCP Client 主动连接
+  mqtt_enabled: false    # 开启 MQTT 通道
 
+# TCP Server 配置 (本机监听)
+server:
+  bind: "0.0.0.0"
+  port: 9000
+
+# TCP Client 配置 (主动连外部)
 client:
-  server_ip: "175.24.177.82"		#本机 127.0.0.1
-  server_port: 20001				#本机 9000
+  server_ip: "175.24.177.82"
+  server_port: 20001
   reconnect_interval_ms: 5000
   edge_id: "edge-1"
   robot_id: "lite3-1"
   device: "lite3"
 
+# MQTT 通信配置
+mqtt:
+  broker_enabled: false        # 启用内置 Mosquitto Broker
+  broker_bind: "0.0.0.0"
+  broker_port: 1883
+  broker_executable: ""        # 留空自动搜索
+  broker_config: "/tmp/lljs_ctrl_mosquitto.conf"
+  broker_allow_anonymous: true
+  client_enabled: false        # 启用 MQTT Client (连接本地或外部 Broker)
+  host: "127.0.0.1"
+  port: 1883
+  client_id: "lljs_ctrl"
+  username: ""
+  password: ""
+  reconnect_interval_ms: 5000
+
+# ── 云迹 SC668s 配置 ──
+yunji:
+  ip: "192.168.10.10"
+  port: 31001
+
+# ── 云深处 Lite3 配置 ──
 lite3:
-  ip: "192.168.1.120"				#wifi mode： 192.168.2.1
-  port: 43893
-  receive_port: 43897
-
+  ip: "192.168.1.120"          # 连接目标 IP
+  port: 43893                  # 控制端口
+  receive_port: 43897          # 状态接收端口
 lite3_heartbeat:
-  interval_ms: 20
+  interval_ms: 20              # 心跳间隔 (20ms)
 
-server:
-  bind: "0.0.0.0"
-  port: 9000
-
+# ── 遥控参数限幅 ──
 control:
-  joy_hz: 5
-  max_linear: 0.5
-  max_angular: 1.0
-  linear_step: 0.05
+  joy_hz: 5                    # 遥控发送频率 (云迹使用)
+  max_linear: 0.5              # 最大线速度 (m/s)
+  max_angular: 1.0             # 最大角速度 (rad/s)
+  linear_step: 0.05            # 键盘调节步长
   angular_step: 0.1
 
-lite3_heartbeat:
-  interval_ms: 20
-
+# ── 状态与日志 ──
 status:
-  poll_hz: 2
-
+  poll_hz: 2                   # 机器人状态轮询频率
 log:
-  queue_size: 20
-```
+  queue_size: 20               # 终端 HUD 显示日志条数
 
-实际部署时请根据现场网络修改 IP、端口和 client/server 模式。
+# ── 声网 (Agora) 音视频集成 ──
+agora:
+  enabled: true                # ★ 总开关
+  app_id: "your_app_id"
+  license: ""
+  area_code: "CN"              # CN / GLOB / NA / EU / AS / JP
+  log_level: 7                 # -1(关), 4(ERROR), 7(INFO)
+  
+  rtm:
+    enabled: true
+    uid: "robot-1"
+    token: ""
+    mode: "both"               # peer / channel / both
+    channel: "testChannel"
+    operator_uid: "operator-1"
+    ack_enabled: true
+
+  rtsa:
+    channel: "testChannel"
+    uid: 1001
+    token: ""
+    token_renew: true
+    rtcm_signaling: true
+    auto_join: true
+    subscribe: false
+
+  video:
+    enabled: true
+    device: "/dev/video21"     # 摄像头节点
+    mode: "h264"               # h264:硬编 / yuv:直传
+    width: 1280
+    height: 720
+    fps: 25
+    bitrate_kbps: 1800
+    gop: 20
+
+  audio:
+    enabled: true
+    device_in: "plughw:1,0"    # 麦克风节点
+    device_out: "default"      # 扬声器节点
+    sample_rate: 16000
+    channels: 1
+    frame_ms: 20
+    play_sample_rate: 0
+    listen: true               # 启动即开启下行对讲
+
+  vad:
+    enabled: false             # 语音活动检测 (预留)
 
 ---
 
-## 6. 编译
+## 6.  编译与依赖
+##6.1 环境依赖
+操作系统: Linux (推荐 Ubuntu 20.04/22.04 ARM64)
+编译工具: CMake >= 3.10, GCC/G++ (支持 C++14)
+第三方库:
+	libasound2-dev (ALSA 音频)
+	libmosquitto-dev (MQTT)
+	声网 RTSA SDK (libagora-rtc-sdk.so)
+	瑞芯微 MPP 库 (针对 RK3588)
 
-### 6.1 Make
+项目同时支持 Makefile 和 CMake 两种构建方式，并支持 x86_64 (PC) 和 ARM64 (RK3588/SC668s) 双架构编译。
+在编译前，请确保执行了环境准备脚本（拉取声网 SDK、MPP 库等）：
+./scripts/prepare_agora_env.sh
 
-```bash
+### 6.2 Make
+# 查看支持的指令
+make help
+
+# 默认纯控制端编译 (x86 架构)
 make
-```
-编译结果：
-```text
-./lljs_ctrl
-```
-清理：
-```bash
+
+# ARM 架构编译纯控制端
+make PLATFORM=arm
+
+# 编译包含声网音视频的完整版 (x86 架构)
+make AGORA=1
+
+# 编译包含声网音视频的完整版 (ARM 架构)
+make PLATFORM=arm AGORA=1
+
+# 清理产物
 make clean
-```
-重新编译：
-```bash
-make rebuild
-```
-配置检查：
-```bash
-make check
-```
-全部检查：
-```bash
-make check-all
-```
 
-### 6.2 CMake
+### 6.2  使用 CMake (标准构建)
+注意：开启 Agora 需显式传入 -DLLJS_WITH_AGORA=ON。请确保 third_party/ 下已准备好对应的头文件和库。
 
-x86：
+x86_64 (PC) 编译：(真实部署未使用)
 
-- mkdir build && cd build
-- Navigate to the ***build*** directory and then compile:
-
-   - Compile for x86 hosts:
-
-		```bash
-		cd build
-		cmake .. -DBUILD_PLATFORM=x86     # cmake <path to where the CMakeLists.txt is>
-		make -j
+	mkdir build && cd build
+	make .. -DBUILD_PLATFORM=x86 -DLLJS_WITH_AGORA=ON
+	make -j$(nproc)
 		```
 
-ARM：
+ARM64 (板端) 编译：
 
 ```bash
-cmake -S . -B build -DBUILD_PLATFORM=arm
-cmake --build build -j$(nproc)
+cmake -S . -B build-arm -DBUILD_PLATFORM=arm -DLLJS_WITH_AGORA=ON
+cmake --build build-arm -j1
 ```
 或：
 	- Compile for ARM hosts:
 
-		```bash
-		cd build
-		cmake .. -DBUILD_PLATFORM=arm     # cmake <path to where the CMakeLists.txt is>
-		make -j
+		mkdir build && cd build
+		cmake .. -DBUILD_PLATFORM=arm -DLLJS_WITH_AGORA=ON
+		make -j$(nproc)
 		```
----
 
 ## 7. 启动服务
+
+# 指定配置文件启动
+./lljs_ctrl -c config/config.yaml
+
+# 校验配置文件格式是否正确
+./lljs_ctrl --check-config -c config/config.yaml
+
+不指定 `-c` 时按以下顺序搜索默认配置：
+`./config.yaml` → `./config/config.yaml` → `/etc/lljs_ctrl/config.yaml`
 
 ### server 模式
 
@@ -628,19 +647,6 @@ network:
 server:
   bind: "0.0.0.0"
   port: 9000
-```
-启动：
-
-```bash
-./lljs_ctrl -c config/config.yaml
-```
-不指定 `-c` 时按以下顺序搜索默认配置：
-`./config.yaml` → `./config/config.yaml` → `/etc/lljs_ctrl/config.yaml`
-
-或者：
-
-```bash
-make run
 ```
 
 ### client 模式
@@ -657,11 +663,9 @@ client:
   reconnect_interval_ms: 5000
 ```
 
-启动后 `lljs_ctrl` 主动连接外部 TCP Server，并在连接成功后发送注册信息。
-
----
-
 ## 8. Python 测试工具
+Web 拉流测试：用浏览器打开 test/web_demo_h264.html，输入对应的 AppID 和 Channel 即可验证视频画面与语音对讲。
+Python 控制台测试：python3 test/test_client.py 127.0.0.1 9000 --dashboard
 
 两个工具分别用于两种网络角色。
 
@@ -941,6 +945,23 @@ Lite3 → UDP 43897 → Lite3Driver → TCP telemetry → test_client
 说明 TCP Telemetry 快照转发正常；这里显示的是项目层每 200ms 的快照发送频率，并不代表 Lite3 原始 UDP 上报频率。
 
 ---
+## MQTT Topic
+
+MQTT Topic 不再放在配置文件中，由 `src/network/mqtt_client.cpp` 统一定义。
+
+- 默认控制订阅过滤器：`device/command/#`
+- 默认遥测发布 Topic：`device/telemetry`
+
+`device/command/#` 支持 Topic 扩展，例如：
+
+```text
+device/command
+device/command/lite3
+device/command/lite3/axis
+device/command/lite3/gait
+```
+
+收到 `device/command/#` 下任意 Topic 的 JSON 消息后，统一进入现有指令处理链。后续如需增加其它 Topic，可在 `MqttClient` 中增加独立订阅过滤器，不需要修改配置文件。
 
 ## 14. 设计要点与注意事项
 
@@ -966,104 +987,5 @@ Lite3 → UDP 43897 → Lite3Driver → TCP telemetry → test_client
 9. TCP Telemetry 是本项目增加的监控通道，不改变 Lite3 UDP 原始协议。
 10. 不要把 `test/test_external_server.py` 暴露到不可信公网环境。
 
----
-
-## 15. 版本信息
-
-```text
-Application: lljs_ctrl
-Lite3 API:  V1.0.7
-Build:      C++11
-Platform:   Ubuntu 20.04 x86 / ARM
-```
 
 
-## 网络开关的推荐配置
-
-### 默认：仅 TCP Client
-
-```yaml
-network:
-  server_enabled: false
-  client_enabled: true
-  mqtt_enabled: false
-```
-
-### TCP Server + TCP Client + MQTT 同时开启
-
-```yaml
-network:
-  server_enabled: true
-  client_enabled: true
-  mqtt_enabled: true
-```
-
-三路收到的业务 JSON 不重复实现解析逻辑，统一调用：
-
-```text
-TCP Server ─┐
-TCP Client ─┼→ handleRemoteCommandFrom() → InputAdapter → CmdTranslator
-MQTT      ──┘
-```
-
-这样可以保证同一个 JSON 指令通过 TCP 或 MQTT 到达时，设备侧行为一致。
-
-
-## MQTT Topic
-
-MQTT Topic 不再放在配置文件中，由 `src/network/mqtt_client.cpp` 统一定义。
-
-- 默认控制订阅过滤器：`device/command/#`
-- 默认遥测发布 Topic：`device/telemetry`
-
-`device/command/#` 支持 Topic 扩展，例如：
-
-```text
-device/command
-device/command/lite3
-device/command/lite3/axis
-device/command/lite3/gait
-```
-
-收到 `device/command/#` 下任意 Topic 的 JSON 消息后，统一进入现有指令处理链。后续如需增加其它 Topic，可在 `MqttClient` 中增加独立订阅过滤器，不需要修改配置文件。
-
-## Mosquitto 多架构库
-
-工程使用官方 Mosquitto `libmosquitto.so` 动态库，
-
-第三方库按 CPU 架构分别放置：
-
-```text
-lib/
-├── x86_64/
-│   ├── libmosquitto.so -> libmosquitto.so.1.6.9
-│   ├── libmosquitto.so.1 -> libmosquitto.so.1.6.9
-│   └── libmosquitto.so.1.6.9
-└── aarch64/
-    ├── libmosquitto.so -> libmosquitto.so.1.6.9
-    ├── libmosquitto.so.1 -> libmosquitto.so.1.6.9
-    └── libmosquitto.so.1.6.9
-```
-
-PC x86_64 构建：
-
-```bash
-cmake -S . -B build -DBUILD_PLATFORM=x86
-cmake --build build -j$(nproc)
-```
-
-ARM64 交叉构建：
-
-```bash
-cmake -S . -B build -DBUILD_PLATFORM=arm
-cmake --build build -j$(nproc)
-```
-
-Makefile 也支持：
-
-```bash
-make PLATFORM=x86
-make PLATFORM=arm
-```
-
-构建时会检查 `libmosquitto.so` 的 ELF 架构，避免 ARM 构建误链接 x86_64 Mosquitto 动态库。

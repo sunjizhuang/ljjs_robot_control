@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>lljs_ctrl 视频测试页 (codec=h264)</title>
+<script src="https://download.agora.io/sdk/release/AgoraRTC_N-4.20.0.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 16px; background: #f5f5f5; }
+  .bar { margin-bottom: 12px; }
+  input { padding: 6px 8px; margin-right: 8px; width: 320px; }
+  button { padding: 6px 16px; margin-right: 8px; cursor: pointer; }
+  #log { background: #fff; border: 1px solid #ccc; padding: 8px; height: 140px;
+         overflow-y: auto; font-size: 12px; margin: 12px 0; white-space: pre-wrap; }
+  .player { display: inline-block; margin: 8px; background: #000; width: 480px; height: 270px; }
+  .tip { color: #b00; font-weight: bold; }
+</style>
+</head>
+<body>
+<h3>lljs_ctrl 视频接收测试 — <span class="tip">codec: h264</span></h3>
+<div class="bar">
+  AppID: <input id="appid" value="d00d8d658beb41178dca0431b6df038e">
+  频道: <input id="channel" value="testChannel" style="width:140px">
+  Token: <input id="token" placeholder="Certificate 开启时必填" style="width:200px">
+  UID: <input id="uid" placeholder="可空" style="width:80px">
+  <button id="join">加入</button>
+  <button id="leave" disabled>退出</button>
+  <button id="check">检查远端用户</button>
+  <button id="meter">监测音频电平</button>
+  <label style="margin-right:8px"><input type="checkbox" id="pubmic" checked> 发布我的麦克风（双向对讲）</label>
+  <button id="mute" disabled>麦克风: 开</button>
+  <label style="margin-left:8px">远端音量 <input type="range" id="vol" min="0" max="300" value="200"
+       style="width:120px;vertical-align:middle" oninput="document.getElementById('volv').textContent=this.value">
+    <span id="volv">200</span></label>
+</div>
+<div id="log"></div>
+<div id="players"></div>
+
+<script>
+const log = (m) => { const d = document.getElementById('log');
+  d.textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`; d.scrollTop = d.scrollHeight; };
+
+let client = null;
+let micTrack = null;   /* 本地麦克风轨道 (双向对讲) */
+const audioTracks = [];   /* 远端音频轨道, 供音量滑杆统一调节 */
+let meterTimer = null;    /* 音频电平/码率监测定时器 */
+
+document.getElementById('vol').oninput = function () {
+  audioTracks.forEach(t => { try { t.setVolume(Number(this.value)); } catch (e) {} });
+};
+
+document.getElementById('mute').onclick = async () => {
+  if (!micTrack) return;
+  const btn = document.getElementById('mute');
+  const enable = btn.textContent.includes('开');
+  await micTrack.setEnabled(!enable ? true : false);
+  btn.textContent = enable ? '麦克风: 关' : '麦克风: 开';
+  log(`本地麦克风已${enable ? '静音' : '取消静音'}`);
+};
+
+document.getElementById('join').onclick = async () => {
+  const appid = document.getElementById('appid').value.trim();
+  const channel = document.getElementById('channel').value.trim();
+  const token = document.getElementById('token').value.trim() || null;
+  const uidStr = document.getElementById('uid').value.trim();
+  const uid = uidStr ? Number(uidStr) : null;
+
+  client = AgoraRTC.createClient({ mode: "rtc", codec: "h264" });  // ★ 关键: h264
+  client.on("user-published", async (user, mediaType) => {
+    log(`user-published uid=${user.uid} type=${mediaType}`);
+    try {
+      await client.subscribe(user, mediaType);
+      if (mediaType === "video") {
+        const div = document.createElement('div');
+        div.className = 'player'; div.id = `p-${user.uid}`;
+        document.getElementById('players').appendChild(div);
+        user.videoTrack.play(`p-${user.uid}`);
+        log(`视频已播放 uid=${user.uid}`);
+      } else {
+        const v = Number(document.getElementById('vol').value) || 200;
+        user.audioTrack.setVolume(v);   /* 默认 200 增强, 机器人侧电平偏低 */
+        user.audioTrack.play();
+        audioTracks.push(user.audioTrack);
+        log(`音频已播放 uid=${user.uid} (音量 ${v})`);
+      }
+    } catch (e) { log(`订阅失败: ${e.message || e}`); }
+  });
+  client.on("user-unpublished", (user, mediaType) => {
+    log(`user-unpublished uid=${user.uid} type=${mediaType}`);
+    if (mediaType === "video") {
+      const p = document.getElementById(`p-${user.uid}`);
+      if (p) p.remove();
+    }
+  });
+  client.on("connection-state-change", (cur, prev) => log(`连接: ${prev} -> ${cur}`));
+
+  try {
+    const myUid = await client.join(appid, channel, token, uid);
+    log(`入会成功 uid=${myUid} (mode=rtc codec=h264)`);
+    startMeter();   /* 自动开监测: 截图就能看到电平/收码率, 免手动点击 */
+    document.getElementById('join').disabled = true;
+    document.getElementById('leave').disabled = false;
+
+    /* 双向对讲: 发布本地麦克风 (默认勾选) */
+    if (document.getElementById('pubmic').checked) {
+      try {
+        micTrack = await AgoraRTC.createMicrophoneAudioTrack();
+        await client.publish([micTrack]);
+        document.getElementById('mute').disabled = false;
+        log('本地麦克风已发布 (机器人应能听到你说话)');
+      } catch (e) { log(`麦克风发布失败: ${e.message || e} (检查浏览器麦克风权限)`); }
+    }
+  } catch (e) { log(`入会失败: ${e.message || e}`); }
+};
+
+document.getElementById('check').onclick = () => {
+  if (!client) { log('尚未入会'); return; }
+  const us = client.remoteUsers || [];
+  if (!us.length) { log('remoteUsers 为空 (服务端未广播任何远端用户/流)'); return; }
+  us.forEach(u => log(`remoteUser uid=${u.uid} hasVideo=${u.hasVideo} videoTrack=${u.videoTrack ? '有' : '无'} hasAudio=${u.hasAudio} audioTrack=${u.audioTrack ? '有' : '无'}`));
+};
+
+/* ── 音频电平/码率监测 ──
+ * 用途: 隔离"板端上行没声音"还是"浏览器收到了但听不到"。
+ *   有电平、有码率 → 数据到了浏览器, 问题在播放侧 (音量/输出设备/静音键)
+ *   电平恒 0 且有码率 → 数据到了但内容静音, 问题在板端采集/增益
+ *   无码率、无轨道  → 根本没收到上行音频 */
+function meterTick() {
+  if (!client) return;
+  const tracks = audioTracks.length ? audioTracks
+    : (client.remoteUsers || []).map(u => u.audioTrack).filter(Boolean);
+
+  let line = '[音频] ';
+  if (!tracks.length) {
+    line += '无远端音频轨道 (未收到上行音频)';
+  } else {
+    line += tracks.map(t => {
+      let lv;
+      try { lv = Math.round((t.getVolumeLevel() || 0) * 1000) / 1000; }
+      catch (e) { lv = 'n/a'; }
+      const uid = (typeof t.getUserId === 'function') ? t.getUserId() : '?';
+      return `uid=${uid} 电平=${lv}`;
+    }).join(' | ');
+  }
+  try {
+    const st = client.getRemoteAudioStats ? client.getRemoteAudioStats() : null;
+    if (st && st.length) {
+      line += ' | ' + st.map(s =>
+        `收=${Math.round(s.receiveBitrate || 0)}kbps 丢包=${s.receivePacketLossRate != null ? s.receivePacketLossRate + '%' : '?'}`
+      ).join(' ');
+    }
+  } catch (e) {}
+  log(line + ` | 本地音量=${document.getElementById('vol').value}`);
+}
+
+function startMeter() {
+  if (meterTimer || !client) return;
+  meterTimer = setInterval(meterTick, 1000);
+  document.getElementById('meter').textContent = '停止监测';
+}
+
+function stopMeter() {
+  if (!meterTimer) return;
+  clearInterval(meterTimer); meterTimer = null;
+  document.getElementById('meter').textContent = '监测音频电平';
+}
+
+document.getElementById('meter').onclick = () => {
+  if (meterTimer) { stopMeter(); log('已停止音频监测'); return; }
+  if (!client) { log('尚未入会'); return; }
+  startMeter();
+  log('开始监测 (每秒一次)');
+};
+
+document.getElementById('leave').onclick = async () => {
+  stopMeter();
+  if (micTrack) {
+    try { micTrack.close(); } catch (e) {}
+    micTrack = null;
+    document.getElementById('mute').disabled = true;
+    document.getElementById('mute').textContent = '麦克风: 开';
+  }
+  if (client) { await client.leave(); client = null; }
+  audioTracks.length = 0;
+  document.getElementById('players').innerHTML = '';
+  document.getElementById('join').disabled = false;
+  document.getElementById('leave').disabled = true;
+  log('已退出');
+};
+</script>
+</body>
+</html>

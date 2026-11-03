@@ -39,8 +39,8 @@ client:
   reconnect_interval_ms: 5000
   # TCP Client 连接成功后立即发送注册报文；每次自动重连成功都会再次发送
   # 生成格式: {"cmd":"register","edgeId":"edge-1","robotId":"lite3-1","device":"lite3"}
-  edge_id: "edge-1"
-  robot_id: "lite3-1"
+  edge_id: "edge-test"
+  robot_id: "lite3-2"
   # 可选: yunji / lite3；留空时使用当前实际激活设备类型
   device: "lite3"
 
@@ -109,3 +109,76 @@ status:
 # ── 日志 ──
 log:
   queue_size: 20       # 终端 HUD 显示的最近日志条数
+
+# ══════════════════════════════════════════════════════════
+# ── Agora RTSA 音视频 + 信令（声网集成） ──
+#
+# "音视频流 + 信令控制"双管齐下模式:
+#   信令: RTM peer / RTM channel / RTCM 三路并行，与 TCP/MQTT 平级，
+#         收到的 JSON 与原有协议完全相同，统一进入现有指令处理链。
+#   媒体: V4L2 采集 → MPP 硬编码 H.264 → RTSA 推流；ALSA 采集 PCM 上行 +
+#         下行播放（双向对讲）。
+# 总开关 enabled=false 时整个模块不初始化，行为与未集成版完全一致。
+#
+# 外部指令（可经 TCP/MQTT/RTM/RTCM 任意通道下发）:
+#   {"cmd":"av_join","channel":"robot-av","uid":1001,"token":"..."}
+#   {"cmd":"av_leave"}
+#   {"cmd":"av_video","enabled":true}
+#   {"cmd":"av_audio","enabled":true}
+#   {"cmd":"av_listen","enabled":true}     # 下行对讲开关
+#   {"cmd":"av_status"}
+# ══════════════════════════════════════════════════════════
+agora:
+  enabled: true                 # ★ 总开关（false 时以下所有配置无效）
+  #app_id: "d00d8d658beb41178dca0431b6df038e"          # 声网 App ID（必填）
+  app_id: "02aca9d8c0474fc084d5b58f4e580e35"
+  license: ""                    # 商用 License 值（试用期可留空）
+  area_code: "CN"                # 区域: CN / GLOB / NA / EU / AS / JP
+  log_level: 7                   # SDK 日志级别: -1 关闭, 2=ALERT, 4=ERROR, 5=WARNING, 7=INFO (排障期间用 7)
+
+  # ── RTM 信令（启动即常驻登录，指令通道的入口） ──
+  rtm:
+    enabled: true
+    uid: "robot-1"               # 机器人 RTM uid
+    token: ""                    # RTM Token（与 RTSA Token 不可混用；App ID 鉴权留空）
+    mode: "both"                 # peer / channel / both
+    channel: "testChannel"         # channel/both 模式的指令+遥测频道
+    operator_uid: "operator-1"   # peer/both 模式的默认对端（远端控制端）
+    ack_enabled: true            # av_* 指令执行结果回执
+
+  # ── RTSA 音视频通道（由 av_join/av_leave 指令控制，auto_join=true 除外） ──
+  rtsa:
+    channel: "testChannel"          # 默认音视频频道（Web 观看端填同名频道）
+    uid: 1001                    # 机器人 uid（0=SDK 自动分配）
+    token: ""                    # RTSA Token（官方称 RTC Token；App ID 鉴权留空）
+    token_renew: true            # Token 过期自动续期
+    rtcm_signaling: true         # 入频后启用 RTCM 低延迟信令路径
+    auto_join: true             # true: 启动即入频推流（false: 等待 av_join 指令）
+    subscribe: false             # 是否订阅远端媒体流（纯推流 false；双向对讲时音频订阅仍生效）
+
+  # ── 视频采集与编码（V4L2 + RK3588 MPP） ──
+  video:
+    enabled: true
+    device: "/dev/video21"       # UVC 设备节点（运行时自动探测 YU12/NV12/MJPEG）
+    mode: "h264"                 # h264: YUV→MPP硬编H264（默认）; yuv: YUV420直传SDK（需SDK支持）
+    width: 1280                  # 720p，需 16 对齐
+    height: 720
+    fps: 25
+    bitrate_kbps: 1800           # 建议区间 1500-2000（带宽回调会动态调整）
+    gop: 20                      # 关键帧间隔: 板端实际 10fps → 2s 一个 IDR，加快 Web 首帧
+
+  # ── 音频（ALSA，双向对讲） ──
+  audio:
+    enabled: true
+    device_in: "plughw:1,0"      # 麦克风采集设备 (card1 NationalChip USB 声卡的麦克风口)
+                                 # 注意: card2 是 USB 摄像头麦克风, 电平低/音质差 → "听不清"的元凶, 勿用
+    device_out: "default"        # 下行播放设备（扬声器）
+    sample_rate: 16000           # 16kHz
+    channels: 1                  # 单声道
+    frame_ms: 20                 # 每帧 20ms（SDK 内置 Opus 编码）
+    play_sample_rate: 0          # 下行播放采样率; 0=跟随 sample_rate（音调异常时手动指定）
+    listen: true                 # 启动即开下行对讲播放（false=用 av_listen 指令动态开）
+
+  # ── 语音活动检测（预留，本期无效） ──
+  vad:
+    enabled: false

@@ -4,6 +4,7 @@
 
 PLATFORM ?= x86
 PYTHON   ?= python3
+AGORA    ?= 0          # 1 = 集成 Agora RTSA 音视频+信令 (需先执行 scripts/prepare_agora_env.sh)
 
 ifeq ($(PLATFORM),arm)
 CXX ?= aarch64-linux-gnu-g++
@@ -24,8 +25,25 @@ OPENSSL_LIBS = -lssl -lcrypto
 MOSQUITTO_LIB_DIR = lib/$(MOSQUITTO_ARCH_DIR)
 MOSQUITTO_LIB = $(MOSQUITTO_LIB_DIR)/libmosquitto.so
 
+# ── Agora (RTSA) 集成 ──
+AGORA_SRCS =
+AGORA_FLAGS =
+AGORA_LIBS =
+ifeq ($(AGORA),1)
+AGORA_SRCS = src/agora/agora_service.cpp src/agora/agora_bridge.cpp \
+             src/agora/v4l2_capture.cpp src/agora/mpp_encoder.cpp \
+             src/agora/alsa_capture.cpp src/agora/alsa_player.cpp \
+             src/agora/yuyv_convert.cpp
+AGORA_FLAGS = -DLLJS_WITH_AGORA -Isrc/agora -Ithird_party/agora_sdk/include \
+              -Ithird_party/alsa/include -Ithird_party/rockchip_mpp/include
+AGORA_LIBS = third_party/agora_sdk/lib/aarch64/libagora-rtc-sdk.so \
+             third_party/rockchip_mpp/lib/aarch64/librockchip_mpp.so \
+             third_party/alsa/lib/aarch64/libasound.so -ldl
+endif
+
 NETWORK_MQTT_SRC = src/network/mqtt_client.cpp src/network/mqtt_broker.cpp
 NETWORK_MQTT_OBJ = $(NETWORK_MQTT_SRC:.cpp=.o)
+AGORA_OBJS = $(AGORA_SRCS:.cpp=.o)
 
 SRCS = src/main.cpp \
        src/util/log.cpp src/util/json.cpp \
@@ -33,10 +51,10 @@ SRCS = src/main.cpp \
        src/config/yaml_config.cpp \
        src/device/yunji_driver.cpp src/device/lite3_driver.cpp \
        src/control/input_adapter.cpp src/control/cmd_translator.cpp \
-       src/keyboard_control.cpp
+       src/keyboard_control.cpp $(AGORA_SRCS)
 
 OBJS = $(SRCS:.cpp=.o)
-ALL_OBJS = $(OBJS) $(NETWORK_MQTT_OBJ)
+ALL_OBJS = $(OBJS) $(NETWORK_MQTT_OBJ) $(AGORA_OBJS)
 
 .PHONY: all clean rebuild check python-check check-all \
         cmake-x86 cmake-arm cmake-build \
@@ -45,10 +63,10 @@ ALL_OBJS = $(OBJS) $(NETWORK_MQTT_OBJ)
 all: $(TARGET)
 
 $(TARGET): $(ALL_OBJS) $(MOSQUITTO_LIB)
-	$(CXX) $(CXXFLAGS) -o $@ $(ALL_OBJS) -L$(MOSQUITTO_LIB_DIR) -lmosquitto $(OPENSSL_LIBS) $(LDFLAGS) -Wl,-rpath,'$$ORIGIN/$(MOSQUITTO_LIB_DIR)' -Wl,-rpath-link,$(MOSQUITTO_LIB_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(ALL_OBJS) -L$(MOSQUITTO_LIB_DIR) -lmosquitto $(OPENSSL_LIBS) $(LDFLAGS) $(AGORA_LIBS) -Wl,-rpath,'$$ORIGIN/$(MOSQUITTO_LIB_DIR)' -Wl,-rpath-link,$(MOSQUITTO_LIB_DIR) -Wl,-rpath-link,third_party/agora_sdk/lib/aarch64 -Wl,-rpath-link,third_party/rockchip_mpp/lib/aarch64 -Wl,-rpath-link,third_party/alsa/lib/aarch64
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(AGORA_FLAGS) -c -o $@ $<
 
 check: $(TARGET)
 	./$(TARGET) --check-config -c config/config.yaml
