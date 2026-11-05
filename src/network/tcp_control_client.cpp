@@ -67,6 +67,14 @@ bool TcpControlClient::connectOnce()
 
     int reuse = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &reuse, sizeof(reuse));
+    /* 缩短 TCP Keepalive 探测参数，防止公网 NAT/防火墙静默丢弃空闲连接 */
+    int keep_idle = 60;   /* 连接空闲 60 秒后开始发送第一个探测包 */
+    int keep_intvl = 15;  /* 探测间隔 15 秒 */
+    int keep_cnt = 4;     /* 连续 4 次探测无响应则判定连接死亡 */
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keep_idle,  sizeof(keep_idle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keep_intvl, sizeof(keep_intvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keep_cnt,   sizeof(keep_cnt));	
+	
     int flag = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
