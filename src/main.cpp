@@ -423,6 +423,9 @@ int main(int argc, char* argv[])
                      g_config.agora.audio.enabled ? "开" : "关");
         } else {
             LOG_ERR("Agora 启动失败: %s (继续以纯控制面模式运行)", agora_err.c_str());
+            /* 修复: 滤器闭包持有 agora_bridge 裸指针, 对象销毁前必须清除,
+               否则后续 MQTT/TCP 指令会调用悬空指针导致崩溃 */
+            controller.setCommandFilter(nullptr);
             delete agora_bridge;
             delete agora_svc;
             agora_bridge = nullptr;

@@ -260,14 +260,19 @@ agora/ (音视频与信令层)：
 ###3. JSON 协议与操作指令全集
 外部控制端可通过任意网络通道（TCP / MQTT / Agora RTM）下发以下 JSON 指令。若未填写 device 字段，默认发往当前“激活设备”；
    指定 "device":"lite3" 或 "device":"yunji" 可强制发往特定设备；指定 "device":"all" 发往所有已连接设备
-###3.1 通用控制与设备切换
+
+###3.1 标准注册报文格式
+{"cmd":"register","edgeId":"edge-1","robotId":"lite3-1","device":"lite3"}
+
+###3.2 通用控制与设备切换
 // 切换当前激活设备 (在 yunji 和 lite3 之间切换)
 {"cmd":"switch_device"}
 
-###3.2 云深处 (Lite3) 专属指令
+###3.3 云深处 (Lite3) 专属指令
 // 模式切换 (stand:站立, move:移动, inplace:原地, auto:自主, manual:手动)
 {"cmd":"mode","mode":"stand","device":"lite3"}
 
+{"cmd":"estop","flag":true,"device":"lite3"}		   //软急停
 // 离散动作控制 (底层通过语音指令码实现)
 {"cmd":"action","action":"forward","device":"lite3"}       // 前进
 {"cmd":"action","action":"backward","device":"lite3"}      // 后退
@@ -311,7 +316,7 @@ value 取值范围为[-32767,32767]， 当轴指令取值在死区范围内时�
 {"cmd":"save_data","device":"lite3"}                         // ⚠️ 保存故障数据并关闭运动程序 (高风险)
 **注意：保存数据 动作 这是高风险测试项。** 按 V1.0.7 接口语义，该指令用于保存故障数据并关闭运动程序。测试工具默认要求输入 `YES` 二次确认。
 
-###3.3 声网 (Agora) 音视频专属指令
+###3.4 声网 (Agora) 音视频专属指令
 // 加入音视频频道
 {"cmd":"av_join","channel":"testChannel","uid":1001,"token":"你的Token(可选)"}
 

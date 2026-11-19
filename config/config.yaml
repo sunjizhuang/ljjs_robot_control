@@ -134,7 +134,7 @@ agora:
   app_id: "02aca9d8c0474fc084d5b58f4e580e35"
   license: ""                    # 商用 License 值（试用期可留空）
   area_code: "CN"                # 区域: CN / GLOB / NA / EU / AS / JP
-  log_level: 7                   # SDK 日志级别: -1 关闭, 2=ALERT, 4=ERROR, 5=WARNING, 7=INFO (排障期间用 7)
+  log_level: 5                   # SDK 日志级别: -1 关闭, 2=ALERT, 4=ERROR, 5=WARNING, 7=INFO (排障期间用 7)
 
   # ── RTM 信令（启动即常驻登录，指令通道的入口） ──
   rtm:
@@ -164,8 +164,8 @@ agora:
     width: 1280                  # 720p，需 16 对齐
     height: 720
     fps: 25
-    bitrate_kbps: 1800           # 建议区间 1500-2000（带宽回调会动态调整）
-    gop: 20                      # 关键帧间隔: 板端实际 10fps → 2s 一个 IDR，加快 Web 首帧
+    bitrate_kbps: 1000           # 建议区间 1500-2000（带宽回调会动态调整）
+    gop: 50                      # 关键帧间隔: 板端实际 10fps → 2s 一个 IDR，加快 Web 首帧
 
   # ── 音频（ALSA，双向对讲） ──
   audio:

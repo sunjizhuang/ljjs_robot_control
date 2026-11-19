@@ -923,9 +923,19 @@ void AgoraService::cb_rtm_event(const char* rtm_uid, rtm_event_type_e type, rtm_
             LOG_INFO("[%s] RTM 登录成功: %s", TAG, rtm_uid ? rtm_uid : "");
             s->rtm_logined_.store(true);
         } else {
-            /* 110=ERR_INVALID_TOKEN: 项目开启 Token 鉴权后, RTM 登录需要 rtm.token (与 RTC Token 不通用) */
-            LOG_ERR("[%s] RTM 登录失败: uid=%s err=%d (110=需要有效 rtm.token, 见 config.yaml rtm.token)",
-                    TAG, rtm_uid ? rtm_uid : "", (int)err);
+            /* 按错误码给出针对性提示 (101=ERR_INVALID_APP_ID, 110=ERR_INVALID_TOKEN) */
+            if ((int)err == ERR_INVALID_APP_ID) {
+                LOG_ERR("[%s] RTM 登录失败: uid=%s err=101 (ERR_INVALID_APP_ID: "
+                        "App ID 无效或未开通 RTM 服务, 检查 config.yaml agora.app_id)",
+                        TAG, rtm_uid ? rtm_uid : "");
+            } else if ((int)err == ERR_INVALID_TOKEN) {
+                LOG_ERR("[%s] RTM 登录失败: uid=%s err=110 (ERR_INVALID_TOKEN: "
+                        "项目开启 Token 鉴权后, RTM 登录需要 rtm.token (与 RTC Token 不通用))",
+                        TAG, rtm_uid ? rtm_uid : "");
+            } else {
+                LOG_ERR("[%s] RTM 登录失败: uid=%s err=%d",
+                        TAG, rtm_uid ? rtm_uid : "", (int)err);
+            }
             s->rtm_logined_.store(false);
         }
         s->rtm_cv_.notify_all();
